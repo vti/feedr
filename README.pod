@@ -1,0 +1,48 @@
+=pod
+
+=head1 NAME
+
+Feedr
+
+=head1 DESCRIPTION
+
+Quick-n-dirty feed aggregator
+
+=head1 SYNOPSYS
+
+    feedr config.yml
+
+Where config.yml is:
+
+    ---
+    feeds:
+        - http://feed1.com
+        ...
+        - http://feedn.com
+    title: MyFeed
+    description: The best feed
+    output: myfeed.rss
+    limits:
+        keywords:
+            - perl
+        age: 2w
+
+Add to crontab and enjoy.
+
+=head1 FEATURES
+
+=over
+
+=item * DWIM
+
+=item * async (L<AnyEvent>)
+
+=item * correctly works with unparsable dates (L<XML::Feed> does not)
+
+=item * truncates the feed after specified age limit
+
+=item * sorts and fixes Last-Modified date
+
+=back
+
+=cut
