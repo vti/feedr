@@ -16,7 +16,7 @@ use constant DEBUG => $ENV{DEBUG};
 sub new {
     my $class = shift;
 
-    my $self = {};
+    my $self = {@_};
     bless $self, $class;
 
     $self->{config} ||= {};
@@ -79,7 +79,7 @@ sub run {
         DEBUG && warn "No results\n";
     }
 
-    return $self;
+    return $feed;
 }
 
 sub _fetch_feeds {
@@ -87,19 +87,19 @@ sub _fetch_feeds {
 
     DEBUG && warn "Downloading feeds...\n";
 
-    my $feeds =
+    my $urls =
       [map { ref $_ eq 'HASH' ? $_->{url} : $_ } @{$self->{config}->{feeds}}];
 
-    $self->{fetcher}->fetch($feeds, @_);
+    $self->{fetcher}->fetch($urls, @_);
 }
 
 sub _parse_feed {
     my $self = shift;
     my ($url, $data_ref) = @_;
 
-    my $feed = XML::Feed->parse($data_ref);
+    my $feed = XML::Feed->parse($data_ref) or die XML::Feed->errstr;
 
-    $self->_fix_dates($feed);
+    $feed = $self->_fix_dates($feed);
 
     $feed = $self->_pick_not_older_than($feed);
 
@@ -130,7 +130,9 @@ sub _pick_not_older_than {
     my $self = shift;
     my ($feed) = @_;
 
-    my $age = $self->{config}->{limits}->{age} || 0;
+    my $age = $self->{config}->{limits}->{age};
+    return $feed unless $age;
+
     my $age_in_seconds = Time::Duration::Parse::parse_duration($age);
 
     DEBUG && warn "Removing older then '$age' ($age_in_seconds) items...\n";
@@ -161,9 +163,10 @@ sub _grep_by_keywords {
 
     ITEM: foreach my $item ($feed->items) {
         foreach my $keyword (@$keywords) {
-            my $not = $keyword =~ s/^!//;
+            my $copy = $keyword;
+            my $not = $copy =~ s/^!//;
 
-            if ($item->content =~ m/\s*$keyword\s*/) {
+            if ($item->content->body =~ m/\s*$copy\s*/) {
                 next ITEM if $not;
 
                 push @items, $item;
@@ -191,17 +194,17 @@ sub _grep_by_categories {
     DEBUG && warn "Greping by " . join(', ', @$categories) . "...\n";
 
     my @items;
-
     ITEM: foreach my $item ($feed->items) {
+        next unless $item->category;
+
         foreach my $category (@$categories) {
-            my $not = $category =~ s/^!//;
+            my $copy = $category;
+            my $not = $copy =~ s/^\!//;
 
-            if ($item->category) {
-                if (grep { $_ =~ m/$category/i } $item->category) {
-                    next ITEM if $not;
+            if (grep { $_ =~ m/$copy/i } $item->category) {
+                next ITEM if $not;
 
-                    push @items, $item;
-                }
+                push @items, $item;
             }
         }
     }
@@ -219,7 +222,7 @@ sub _merge_with_old_feed {
     my ($feed) = @_;
 
     my $old_feed_file = $self->{config}->{output};
-    return $feed unless -e $old_feed_file;
+    return $feed unless $old_feed_file && -e $old_feed_file;
 
     DEBUG && warn "Merging...\n";
 
@@ -329,6 +332,8 @@ sub _save_feed {
     $feed->link($self->{config}->{link});
     $feed->modified(($feed->items)[0]->issued);
 
+    return unless my $output = $self->{config}->{output};
+
     my $xml = $feed->as_xml;
 
     my $dom = XML::LibXML->new(
@@ -337,7 +342,7 @@ sub _save_feed {
         no_network       => 1
     )->parse_string($xml);
 
-    open my $file, '>', $self->{config}->{output};
+    open my $file, '>', $output;
     print $file $dom->toString(2);
 
     return $self;
