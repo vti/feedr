@@ -4,12 +4,12 @@ use strict;
 use warnings;
 
 require Carp;
-use AnyEvent::HTTP;
 use Time::Duration::Parse ();
-use URI;
 use XML::Feed;
 use XML::LibXML;
 use YAML::Tiny;
+use Feedr::Fetcher;
+use Feedr::URLResolver;
 
 use constant DEBUG => $ENV{DEBUG};
 
@@ -20,6 +20,9 @@ sub new {
     bless $self, $class;
 
     $self->{config} ||= {};
+
+    $self->{fetcher}      ||= Feedr::Fetcher->new;
+    $self->{url_resolver} ||= Feedr::URLResolver->new;
 
     return $self;
 }
@@ -32,7 +35,7 @@ sub parse_cmd_args {
 
     DEBUG && warn "Loading config '$config'\n";
 
-    $self->{config} = YAML::Tiny->read($config)
+    $self->{config} = YAML::Tiny->read($config)->[0]
       or die "Can't load config: $YAML::Tiny::errstr: $!\n";
 
     return $self;
@@ -41,11 +44,25 @@ sub parse_cmd_args {
 sub run {
     my $self = shift;
 
-    my $feed = $self->_fetch_feeds;
+    my $feed = XML::Feed->new('RSS');
 
-    $feed = $self->_pick_not_older_than($feed);
+    $self->_fetch_feeds(
+        sub {
+            my ($url, $data) = @_;
 
-    $feed = $self->_grep_by_keywords($feed);
+            eval {
+                my $local_feed = $self->_parse_feed($url, \$data);
+
+                $feed->splice($local_feed);
+
+                1;
+            } or do {
+                my $e = $@;
+
+                DEBUG && warn "Can't parse feed from '$url': $e";
+            };
+        }
+    );
 
     if ($feed->items) {
         $feed = $self->_resolve_urls($feed);
@@ -70,52 +87,50 @@ sub _fetch_feeds {
 
     DEBUG && warn "Downloading feeds...\n";
 
-    my $global_feed = XML::Feed->new('RSS');
+    my $feeds =
+      [map { ref $_ eq 'HASH' ? $_->{url} : $_ } @{$self->{config}->{feeds}}];
 
-    my $feeds = $self->{config}->[0]->{feeds};
+    $self->{fetcher}->fetch($feeds, @_);
+}
 
-    my $cv = AnyEvent->condvar;
+sub _parse_feed {
+    my $self = shift;
+    my ($url, $data_ref) = @_;
 
-    foreach my $feed (@$feeds) {
-        $cv->begin;
+    my $feed = XML::Feed->parse($data_ref);
 
-        http_get $feed,
-          timeout => 15,
-          sub {
-            my ($data, $headers) = @_;
+    $self->_fix_dates($feed);
 
-            if ($headers->{Status} =~ m/^2/) {
-                eval {
-                    my $feed = XML::Feed->parse(\$data);
-                    $global_feed->splice($feed);
-                    1;
-                }
-                or do {
-                    DEBUG && warn "Error parsing $feed\n";
-                };
-            }
-            else {
-                DEBUG && warn "Error [$headers->{Status}] downloading $feed\n"
+    $feed = $self->_pick_not_older_than($feed);
 
-                  # TODO
-            }
-
-            $cv->end;
-          };
+    if (my $global_keywords = $self->{config}->{limits}->{keywords}) {
+        $feed = $self->_grep_by_keywords($feed, $global_keywords);
     }
 
-    $cv->recv;
+    if (my $global_categories = $self->{config}->{limits}->{categories}) {
+        $feed = $self->_grep_by_categories($feed, $global_categories);
+    }
 
-    $self->_fix_dates($global_feed);
+    my ($feed_config) =
+      grep { ref $_ eq 'HASH' && $_->{url} eq $url }
+      @{$self->{config}->{feeds}};
 
-    return $global_feed;
+    if ($feed_config && (my $local_keywords = $feed_config->{keywords})) {
+        $feed = $self->_grep_by_keywords($feed, $local_keywords);
+    }
+
+    if ($feed_config && (my $local_categories = $feed_config->{categories})) {
+        $feed = $self->_grep_by_categories($feed, $local_categories);
+    }
+
+    return $feed;
 }
 
 sub _pick_not_older_than {
     my $self = shift;
     my ($feed) = @_;
 
-    my $age = $self->{config}->[0]->{limits}->{age} || 0;
+    my $age = $self->{config}->{limits}->{age} || 0;
     my $age_in_seconds = Time::Duration::Parse::parse_duration($age);
 
     DEBUG && warn "Removing older then '$age' ($age_in_seconds) items...\n";
@@ -133,9 +148,8 @@ sub _pick_not_older_than {
 
 sub _grep_by_keywords {
     my $self = shift;
-    my ($feed) = @_;
+    my ($feed, $keywords) = @_;
 
-    my $keywords = $self->{config}->[0]->{limits}->{keywords};
     return $feed unless defined $keywords;
 
     $keywords = [$keywords] unless ref $keywords eq 'ARRAY';
@@ -145,19 +159,47 @@ sub _grep_by_keywords {
 
     my @items;
 
-    foreach my $item ($feed->items) {
+    ITEM: foreach my $item ($feed->items) {
         foreach my $keyword (@$keywords) {
-            if ($item->category) {
-                if (grep { $_ =~ m/$keyword/i } $item->category) {
-                    push @items, $item;
-                }
-            }
-            else {
-                DEBUG
-                  && warn
-                  "No categories available, searching through content";
+            my $not = $keyword =~ s/^!//;
 
-                if ($item->content =~ m/\s*$keyword\s*/) {
+            if ($item->content =~ m/\s*$keyword\s*/) {
+                next ITEM if $not;
+
+                push @items, $item;
+            }
+        }
+    }
+
+    $feed = XML::Feed->new('RSS');
+    foreach my $item (@items) {
+        $feed->add_entry($item);
+    }
+
+    return $feed;
+}
+
+sub _grep_by_categories {
+    my $self = shift;
+    my ($feed, $categories) = @_;
+
+    return $feed unless defined $categories;
+
+    $categories = [$categories] unless ref $categories eq 'ARRAY';
+    return $feed unless @$categories;
+
+    DEBUG && warn "Greping by " . join(', ', @$categories) . "...\n";
+
+    my @items;
+
+    ITEM: foreach my $item ($feed->items) {
+        foreach my $category (@$categories) {
+            my $not = $category =~ s/^!//;
+
+            if ($item->category) {
+                if (grep { $_ =~ m/$category/i } $item->category) {
+                    next ITEM if $not;
+
                     push @items, $item;
                 }
             }
@@ -176,7 +218,7 @@ sub _merge_with_old_feed {
     my $self = shift;
     my ($feed) = @_;
 
-    my $old_feed_file = $self->{config}->[0]->{output};
+    my $old_feed_file = $self->{config}->{output};
     return $feed unless -e $old_feed_file;
 
     DEBUG && warn "Merging...\n";
@@ -195,31 +237,7 @@ sub _resolve_urls {
 
     DEBUG && warn "Resolving URLs...\n";
 
-    my $cv = AnyEvent->condvar;
-    foreach my $item ($feed->items) {
-        $cv->begin;
-
-        http_get $item->link,
-          timeout => 15,
-          sub {
-            my ($data, $headers) = @_;
-
-            my $url = $headers->{URL};
-            $url = URI->new($url);
-            $url->query(undef);
-            $url->fragment(undef);
-            $url = $url->as_string;
-            $url =~ s{\s*\[.*?\]$}{};
-
-            $item->link($url);
-
-            $cv->end;
-          };
-    }
-
-    $cv->recv;
-
-    return $feed;
+    return $self->{url_resolver}->resolve($feed);
 }
 
 sub _sort_items {
@@ -306,9 +324,9 @@ sub _save_feed {
 
     DEBUG && warn "Saving...\n";
 
-    $feed->title($self->{config}->[0]->{title});
-    $feed->description($self->{config}->[0]->{description});
-    $feed->link($self->{config}->[0]->{link});
+    $feed->title($self->{config}->{title});
+    $feed->description($self->{config}->{description});
+    $feed->link($self->{config}->{link});
     $feed->modified(($feed->items)[0]->issued);
 
     my $xml = $feed->as_xml;
@@ -319,7 +337,7 @@ sub _save_feed {
         no_network       => 1
     )->parse_string($xml);
 
-    open my $file, '>', $self->{config}->[0]->{output};
+    open my $file, '>', $self->{config}->{output};
     print $file $dom->toString(2);
 
     return $self;
