@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 require Carp;
+use Digest::MD5 ();
 use Time::Duration::Parse ();
 use XML::Feed;
 use XML::LibXML;
@@ -255,14 +256,17 @@ sub _sort_items {
 
     $feed = XML::Feed->new('RSS');
 
-    my %seen = ();
+    my %url_seen = ();
+    my %content_seen = ();
 
     foreach my $item (@items) {
-        next if $seen{$item->link};
+        next if $url_seen{$item->link};
+        next if $content_seen{Digest::MD5::md5_hex($item->content->body)};
 
         $feed->add_entry($item);
 
-        $seen{$item->link}++;
+        $url_seen{$item->link}++;
+        $content_seen{Digest::MD5::md5_hex($item->content->body)}++;
     }
 
     return $feed;

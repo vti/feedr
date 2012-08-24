@@ -120,6 +120,82 @@ EOF
     is(@items, 1);
 }
 
+sub ignore_duplicates_by_url : Test(2) {
+    my $self = shift;
+
+    my $feedr =
+      $self->_build_feedr(
+        [   {url => 'http://foo.com', data => <<'EOF'}], config => {});
+<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>My channel</title>
+    <link>http://foo.com/</link>
+    <description>Description</description>
+    <pubDate>Tue, 10 Jun 2003 04:00:00 GMT</pubDate>
+    <lastBuildDate>Tue, 10 Jun 2003 09:41:01 GMT</lastBuildDate>
+    <item>
+      <title>One</title>
+      <link>http://foo.com/One</link>
+      <description>foo</description>
+      <pubDate>Tue, 03 Jun 2003 09:39:21 GMT</pubDate>
+      <guid>http://http://foo.com/One</guid>
+    </item>
+    <item>
+      <title>Two</title>
+      <link>http://foo.com/One</link>
+      <description>bar</description>
+      <pubDate>Tue, 03 Jun 2003 09:39:21 GMT</pubDate>
+      <guid>http://http://foo.com/Two</guid>
+    </item>
+  </channel>
+</rss>
+EOF
+
+    my $feed = $feedr->run;
+
+    my @items = $feed->items;
+    is(@items, 1);
+}
+
+sub ignore_duplicates_by_content : Test(2) {
+    my $self = shift;
+
+    my $feedr =
+      $self->_build_feedr(
+        [   {url => 'http://foo.com', data => <<'EOF'}], config => {});
+<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>My channel</title>
+    <link>http://foo.com/</link>
+    <description>Description</description>
+    <pubDate>Tue, 10 Jun 2003 04:00:00 GMT</pubDate>
+    <lastBuildDate>Tue, 10 Jun 2003 09:41:01 GMT</lastBuildDate>
+    <item>
+      <title>One</title>
+      <link>http://foo.com/One</link>
+      <description>foo</description>
+      <pubDate>Tue, 03 Jun 2003 09:39:21 GMT</pubDate>
+      <guid>http://http://foo.com/One</guid>
+    </item>
+    <item>
+      <title>Two</title>
+      <link>http://foo.com/Two</link>
+      <description>foo</description>
+      <pubDate>Tue, 03 Jun 2003 09:39:21 GMT</pubDate>
+      <guid>http://http://foo.com/Two</guid>
+    </item>
+  </channel>
+</rss>
+EOF
+
+    my $feed = $feedr->run;
+
+    my @items = $feed->items;
+    is(@items, 1);
+}
+
 sub _build_feedr {
     my $self = shift;
     my ($feeds, %params) = @_;
