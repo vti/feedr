@@ -5,10 +5,12 @@ use warnings;
 
 require Carp;
 use Digest::MD5 ();
+use Encode ();
 use Time::Duration::Parse ();
 use XML::Feed;
 use XML::LibXML;
 use YAML::Tiny;
+
 use Feedr::Fetcher;
 use Feedr::URLResolver;
 
@@ -259,14 +261,19 @@ sub _sort_items {
     my %url_seen = ();
     my %content_seen = ();
 
+
     foreach my $item (@items) {
-        next if $url_seen{$item->link};
-        next if $content_seen{Digest::MD5::md5_hex($item->content->body)};
+        my ($link, $body) = (
+            $item->link,
+            Digest::MD5::md5_hex(
+                Encode::encode('UTF-8', $item->content->body)
+            )
+        );
+
+        next if $url_seen{$link}++;
+        next if $content_seen{$body}++;
 
         $feed->add_entry($item);
-
-        $url_seen{$item->link}++;
-        $content_seen{Digest::MD5::md5_hex($item->content->body)}++;
     }
 
     return $feed;
